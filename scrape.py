@@ -7,15 +7,40 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from tqdm import tqdm
 from mutagen.mp3 import MP3
+from mutagen.aac import AAC
 from concurrent.futures import ThreadPoolExecutor
+from m3u8_downloader import M3U8Downloader
+from ffmpy import FFmpeg
+import glob
+
+
 
 MP3_FOLDER = "./mp3_files"
 NUM_THREADS = 4
 if not os.path.exists(MP3_FOLDER):
     os.makedirs(MP3_FOLDER)
 API_URL = "http://srv.deutschlandradio.de/aodlistaudio.1706.de.rpc"
-DB = PostgresqlDatabase('dlf', user='postgres')
+DB = SqliteDatabase("database.sqlite")
 DB.connect()
+
+
+class Beitrag(Model):
+    title = CharField()
+    date = DateTimeField()
+    station = CharField()
+    author = CharField()
+    sendung = CharField()
+    duration = IntegerField()
+    filename = CharField()
+    filesize = IntegerField()
+
+    class Meta:
+        database = DB
+
+
+
+
+DB.create_tables([Beitrag])
 parser = argparse.ArgumentParser()
 parser.add_argument("--sendung", type=str, default=None,
                     help="Choose the sendung to download, if None then download all")
@@ -33,6 +58,10 @@ STATION_NAME_TO_STATION_ID = {
 }
 SENDUNG_NAME_TO_BROADCAST_ID = {
     "Deutschlandfunk - Der Tag": 788,
+    "Gesichter Europas": 121,
+    "Landerzeit": 148,
+    "Europa Heute": 113,
+    "Die Reportage":219
 }
 ARG_TO_QUERY_ARG = {
     "sendung": ("drau:broadcast_id", SENDUNG_NAME_TO_BROADCAST_ID),
@@ -40,18 +69,6 @@ ARG_TO_QUERY_ARG = {
 }
 
 
-class Beitrag(Model):
-    title = CharField()
-    date = DateTimeField()
-    station = CharField()
-    author = CharField()
-    sendung = CharField()
-    duration = IntegerField()
-    filename = CharField()
-    filesize = IntegerField()
-
-    class Meta:
-        database = DB
 
 
 def add_to_db(title, date, station, author, sendung, duration, filename, filesize):
@@ -71,7 +88,6 @@ def add_to_db(title, date, station, author, sendung, duration, filename, filesiz
 
 def get_mp3(url):
     """get and save mp3 file at the url, (checks that it is indeed mp3) and returns associated information"""
-    assert url[-4:] == ".mp3"
     response = requests.get(url)
     filesize = int(response.headers["Content-Length"])
     filename = url.split("/")[-1]
@@ -81,6 +97,30 @@ def get_mp3(url):
     audio = MP3(filepath)
     duration = audio.info.length
     return filename, duration, filesize
+
+
+
+
+def get_m3u8(url):
+    response = requests.get(url)
+    filesize = int(response.headers["Content-Length"])
+    filename = url.split("/")[-2]
+    filepath = os.path.join(MP3_FOLDER, filename)
+    downloader = M3U8Downloader(url)
+    downloader.download(filepath)
+    new_filepath = filepath[:-1] + "3"
+    ff = FFmpeg(inputs={filepath: None}, outputs={new_filepath: "-f mp3 -acodec mp3 -aq 2"})
+    ff.run()
+    os.remove(filepath)
+    
+    audio = MP3(new_filepath)
+    duration = audio.info.length
+    filesize = os.path.getsize(new_filepath)
+    for f in glob.glob("mp3_files/*.ts"):
+        os.remove(f)
+    for f in glob.glob("mp3_files/*.mp4"):
+        os.remove(f)
+    return new_filepath, duration, filesize
 
 
 def get_xml(query_params):
@@ -121,7 +161,13 @@ def download_and_add(xml_item):
     #### change later ####
     date_time = datetime.fromtimestamp(timestamp)
     ####
-    filename, duration, filesize = get_mp3(url)
+    if url[-4:] == ".mp3":
+        filename, duration, filesize = get_mp3(url)
+    elif url[-5:] == ".m3u8":
+        filename, duration, filesize = get_m3u8(url)
+    else:
+        raise ValueError("unknown filetype")
+    
     add_to_db(title, date_time, station, author,
               sendung, duration, filename, filesize)
 
